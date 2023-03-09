@@ -9,6 +9,9 @@ import tensorflow as tf
 import math
 
 from network import Model
+from enum import Enum
+
+runType = Enum('runType', ['Full', 'DSManifPert', 'SSManifPert','ControlManifPert'])
 
 
 # Set default configuration parameters
@@ -38,6 +41,7 @@ def get_defaultconfig():
     return config
 
 
+# save weights and biases
 def testAndSaveParams(sess, config, model, images, taskIndex, suff=''):
     if suff != '':
         suff = '_'+ suff
@@ -55,6 +59,83 @@ def testAndSaveParams(sess, config, model, images, taskIndex, suff=''):
     sio.savemat(os.path.join('data', 'saved_' + config['save_name'] + '_' + str(taskIndex) +suff+ '.mat'),dat)
 
 
+# core function for manifold perturbations
+def resetOutWeightsWithSameStruct(sess, model, config, k, rType, eigs = None, eigsS = None, states = None):
+    outWts = model.getOutWeights(sess)
+
+    if eigs is None:
+        states1 = states[:,:,0:50]
+        states2 = states[:,:,50:100]
+
+        # Find decision and stimulus subspaces
+        states1Mn = np.mean(states1, axis = 2, keepdims = False)
+        states2Mn = np.mean(states2, axis = 2, keepdims = False)
+
+        # print(str(states1Mn.shape) + ' ' + str(states2Mn.shape))
+        x = np.concatenate((states1Mn, states2Mn), axis=1)
+        # print(str(x.shape))
+        U,S,Vh = np.linalg.svd(x, full_matrices=False)
+        eigs = np.real(U[:,0:k])
+
+        states1D = np.matmul(np.matmul(eigs, eigs.T), np.reshape(states1,(config['num_rnn'],-1)))
+        states2D = np.matmul(np.matmul(eigs, eigs.T), np.reshape(states2,(config['num_rnn'],-1)))
+        states1S = np.reshape(states1,(config['num_rnn'],-1))-states1D
+        states2S = np.reshape(states2,(config['num_rnn'],-1))-states2D
+        xS = np.concatenate((states1S, states2S), axis=1)
+        US,SS,VhS = np.linalg.svd(xS, full_matrices=False)
+        eigsS = np.real(US)
+        
+    # Swap out first few PCs of source subspace from output weights
+    # with first few PCs of target subspace
+    newOutWts = np.copy(outWts)
+    newOrder = config['rng'].permutation(np.arange(k))
+    for i in range(0,k):
+        if rType == runType.SSManifPert:
+            # S -> S mainfold perturbation
+            oldVec = eigsS[:,i]
+            newVec = eigsS[:,newOrder[i]]
+            ov = np.dot(outWts.T, oldVec)
+            newOutWts = newOutWts - np.outer(oldVec, ov) + np.outer(newVec, ov)
+
+        elif rType == runType.DSManifPert:
+            # D -> S mainfold perturbation
+            oldVec = eigs[:,i]
+            newVec = eigsS[:,newOrder[i]]
+            ov = np.dot(outWts.T, oldVec)
+            newOutWts = newOutWts - np.outer(oldVec, ov) + np.outer(newVec, ov)
+
+        elif rType == runType.ControlManifPert:
+            # Control with frozen weights only
+            continue
+        
+        else:
+            raise NotImplementedError()
+
+    model.setOutWeights(sess, newOutWts) # update new output weights
+    return outWts, eigs, eigsS
+
+# Simulate and save learned trajectories -
+# to infer decision and stimulus subspaces,
+# and subsequently perform manifold perturbations
+def getStates(sess, config, model, images):
+
+    st0 = dict()
+    
+    for stim in range(config['num_rnn_out']-1):
+        _, trials,_ = generateData(config, images, test=True, stim=[stim])
+    
+        # Generate feed_dict
+        feed_dict = {model.x: trials['x'],
+                     model.y_rnn: trials['y_rnn'],
+                     model.y_rnn_mask: trials['y_rnn_mask']}
+    
+        # Test model
+        st, op, err = sess.run([model.states, model.y_hat_, model.cost_lsq_rnn], feed_dict=feed_dict)
+
+        st0[stim] = st
+
+    return st0
+            
 # Generate batch of trials
 def generateData(config, images = None, test = False, stim = None):
     # Draw new sample images at random and orthonormalize
@@ -98,15 +179,16 @@ def generateData(config, images = None, test = False, stim = None):
 # Generate model and train network
 def train(seed          = 0,
           batchSize     = 1,
-          l2            = 0.0001,
+          l2            = 0.0005,
           l2_wR          = 0.001,
-          l2_wI          = 0.01,
+          l2_wI          = 0.0001,
           l2_wO          = 0.1,
           learningRateInit = 0.0001,
-          svBnd = 6.0,
+          svBnd = 10.0,
+          rType = runType.Full,
           **kwargs):
 
-    save_name = '{:d}_{:f}_{:f}_{:f}_{:f}_{:f}_{:f}'.format(seed, learningRateInit, l2_wR, l2_wI, l2, l2_wO, svBnd)
+    save_name = '{:d}_{:f}_{:f}_{:f}_{:f}_{:f}_{:f}_{:s}'.format(seed, learningRateInit, l2_wR, l2_wI, l2, l2_wO, svBnd, rType)
                                     
     # Set random seed
     rng = np.random.RandomState(seed)
@@ -133,7 +215,6 @@ def train(seed          = 0,
     config['num_input'] = np.prod(config['image_shape']) + 1 #Image + fixation stim
     config['num_rnn'] = 100
     config['num_rnn_out'] = 2 + 1 # Saccades + Fixation
-    config['max_tasks'] = 1001
     config['fixationInput'] = 1.0/np.sqrt(np.prod(config['image_shape']))
 
 
@@ -143,6 +224,12 @@ def train(seed          = 0,
     config['fixationPeriod']  = np.array([0, int(1500/config['dt'])])
     config['decisionPeriod'] = np.array([int(1500/config['dt']), int(2000/config['dt'])])
 
+    config['runType'] = rType
+    config['max_tasks'] = 1001
+    if config['runType'] != runType.Full:
+        config['max_tasks'] = 101
+
+
     lrFull = config['init_lr_full']
 
     # Display configuration
@@ -151,6 +238,9 @@ def train(seed          = 0,
 
     t_start = time.time()
 
+    if config['runType'] != runType.Full: # for manifold perturbation only
+        saveStates = np.zeros((config['num_rnn'], config['tdim'], 100))
+
     # Reset tensorflow graphs
     tf.compat.v1.reset_default_graph() 
 
@@ -158,6 +248,7 @@ def train(seed          = 0,
     with tf.compat.v1.Session() as sess:
         model = Model(config=config) # Generate graph
         model.initialize(sess) # Initialize graph
+        model.printTrainable() # List trainable vars
         #sess.graph.finalize() # can't do this if graph is altered during training
 
         convCnt = []
@@ -243,18 +334,48 @@ def train(seed          = 0,
                     if firstConv == False:
                         firstConv = True
                         model.updateRegularizerTargets(hNorm[-1], wNormR[-1], wNormI[-1], sess)
+
+                    if config['runType'] != runType.Full:  # for manifold perturbation only
+                        if len(convCnt) == 1:
+                            model.save(len(convCnt))
                     currSingVals = sess.run([model.sings])
                     singVals[len(convCnt)-1,:] = currSingVals[0]
+
+                if config['runType'] != runType.Full:  # for manifold perturbation only
+                    st0 = getStates(sess, config, model, images)
+                    if len(convCnt) <= 50:
+                        X = st0[0]
+                        print('Size: ' + str(X.shape))
+                        saveStates[:,:,len(convCnt)-1] = X.T
+                        X = st0[1]
+                        saveStates[:,:,len(convCnt)-1+50] = X.T
                         
                 # Summarize and print learning stats for learned problem
                 print('Converged in: ' + str(convCnt[-1]) + ' ' + str(len(convCnt)) + ' (' + str(
                     wNormR[-1]) + ' ' +  str(wNormR2[-1]) + ' ('+ str(maxSingVal) +'), ' + str(wNormI[-1]) + ', ' + str(wNormO[-1]) + ') (' + str(hNorm[-1]) + ', ' + str(HM[-1]) + ') ' + str(np.mean(perf[-50:]))+ ' ' + str(topTenSings) )
                 print('Sing Dev: ' + str(np.sum(np.abs(singVals[0,:]-currSingVals[0]))))
+
+                if config['runType'] != runType.Full:  # for manifold perturbation only
+                    if len(convCnt) == 50:
+                        np.save(os.path.join('data', 'states_' + config['save_name']), saveStates)
+
+                        model.restore(1)
+                        oldWts, dEigs, sEigs = resetOutWeightsWithSameStruct(sess, model, config, 4, config['runType'], states=saveStates)
+                        model.removeTrainable(['out_RNN_weights', 'out_RNN_biases'], config)
+                        model.printTrainable()
+
+                    if len(convCnt) >= 50:
+                        print(str(convCnt[-1]))
+                        model.restore(1)
+                        resetOutWeightsWithSameStruct(sess, model, config, 4, config['runType'], eigs=dEigs, eigsS=sEigs)
+                        model.printTrainable()
+                
                 sys.stdout.flush()
 
-                # Finalize graph after homeostatic set point is set
-                if len(convCnt) == 1:
-                    sess.graph.finalize()
+                if config['runType'] == runType.Full:
+                    # Finalize graph after homeostatic set point is set
+                    if len(convCnt) == 1:
+                        sess.graph.finalize()
 
                 # Reset problem specific stats for new problem
                 perf = []
@@ -294,4 +415,5 @@ if __name__ == '__main__':
           l2_wI          = 0.0001,
           l2_wO          = 0.1,
           learningRateInit = 0.0001,
-          svBnd = 10.0)
+          svBnd = 10.0,
+          rType = runType.Full)
