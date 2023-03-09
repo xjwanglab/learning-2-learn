@@ -342,11 +342,11 @@ class Model(object):
 
     # Restore trained model
     def restore(self, sCnt, sess=None):
-        assert self.sess is None
-        if sess is None:
-            sess = tf.compat.v1.get_default_session()
-        self.sess = sess
-        self.saver.restore(sess, os.path.join('data', self.config['save_name']+'_'+str(sCnt)+'.ckpt'))
+        #assert self.sess is None
+        #if sess is None:
+        #    sess = tf.compat.v1.get_default_session()
+        #self.sess = sess
+        self.saver.restore(self.sess, os.path.join('data', self.config['save_name']+'_'+str(sCnt)+'.ckpt'))
 
     # Save model
     def save(self, sCnt):
@@ -393,3 +393,21 @@ class Model(object):
 
         cost_full = self.cost_lsq_rnn + self.cost_reg_rnn
         self.buildOpt(config, cost_full)
+
+    # Get output weight matrix
+    def getOutWeights(self, sess):
+        outWeights = sess.run(self.w_rnn_out)
+        return outWeights
+
+    # Change weight matrix
+    def setOutWeights(self, sess, newOutWeights):
+        wtConst = tf.constant(newOutWeights, dtype = tf.float32)
+        assign_op = self.w_rnn_out.assign(wtConst)
+        sess.run(assign_op)
+
+    # Print all trainable parameters
+    def printTrainable(self):
+        var_list = tf.compat.v1.trainable_variables()
+        print('Trainable')
+        print([v.name for v in var_list])
+        
