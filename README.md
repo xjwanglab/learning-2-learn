@@ -44,6 +44,6 @@ Model analysis code that replicates main figures in paper are located in the *an
 
 Each matlab script in the *analysis* folder replicates 1 or 2 main figures. Each script that relies on time-consuming processing starts with the line:
 ```matlab
-useSaved = True;
+useSaved = true;
 ```
-To re-run the processing on the raw files, set this flag to *False*. To rapidly create the figures from the saved processed data in the *results* folder, leave this flag set to *True*.
+To re-run the processing on the raw files, set this flag to *false*. To rapidly create the figures from the saved processed data in the *results* folder, leave this flag set to *true*.
